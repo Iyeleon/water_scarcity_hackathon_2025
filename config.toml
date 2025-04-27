@@ -1,0 +1,14 @@
+raw_data = './data/dataset/'
+mini_data = './data/dataset_mini_challenge/'
+preprocessed_data = './data/preprocessed/'
+final_data = './data/final/'
+areas = ['brazil', 'france']
+types = ['train', 'eval']
+crs = 'epsg:4326'
+soil_buffer = [1, 5, 25]
+meteo_buffer = [50, 100]
+
+[bbox]
+brazil = [-44.5, -21.5, -39.5, -17.5]
+france = [-3.0, 40.0, 8.0, 49.0]
+
