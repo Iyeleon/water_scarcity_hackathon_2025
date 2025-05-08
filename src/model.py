@@ -43,40 +43,60 @@ from src.helpers import (
 )
 
 class MultiOutputRegressor(BaseEstimator, RegressorMixin):
+    """
+    Multioutput Regression Model 
+    """
     def __init__(self, base_estimator, estimator_params, n_targets = None, chained = True):
+        """
+        Parameters
+        ----------
+        base_estimator: 
+            The base estimator from which the multioutput regressor is built.
+        estimator_params: dict
+            Parameters passed to estimator
+        n_targets: int
+            Number of estimators
+        chained: bool, default = True
+            If `True`, regressions are arranged into a chain. Each model predicts 
+            using all of the available features provided to the model and the 
+            predictions of models that are earlier in the chain.
+        """
         self.base_estimator = base_estimator
         self.estimator_params = estimator_params
         self.chained = chained
         self.n_targets = n_targets
         self.models_ = []
+        self.fitted = False
 
     def fit(self, X, y, eval_set=None, **fit_params):
-        # X = np.array(X)
-        # Y = np.array(y)
-        self.models_ = []
-
+        # get n_targets
         self.n_targets = y.shape[1]
 
+        # define evaluation set if defined
         X_val, Y_val = None, None
         if eval_set:
             X_val, Y_val = eval_set[0]
 
+        # create chain inputs
         X_train_chain = X.copy()
         X_val_chain = X_val.copy() if eval_set else None
 
+        # loop through each output
+        # train, predict and chain
         for i in range(self.n_targets):
             params = self.estimator_params.copy()
             model = self.base_estimator(**params)
             y_train_i = y.iloc[:, i]
 
-            # Resolve fit parameters (per target if needed)
+            # resolve fit parameters (per target if needed)
             local_fit_params = {}
             for k, v in fit_params.items():
                 if isinstance(v, (list, tuple)) and len(v) == self.n_targets:
                     local_fit_params[k] = v[i]
                 else:
                     local_fit_params[k] = v
-
+                    
+            # fit with eval set
             if eval_set:
                 y_val_i = Y_val.iloc[:, i]
                 model.fit(
@@ -87,33 +107,48 @@ class MultiOutputRegressor(BaseEstimator, RegressorMixin):
             else:
                 model.fit(X_train_chain, y_train_i, **local_fit_params)
 
+            # append to models list
             self.models_.append(model)
+
+            # update chain as specified
             if self.chained:
                 y_pred_train = model.predict(X_train_chain).reshape(-1, 1)
-                X_train_chain[f'pred_{i}'] = y_pred_train #np.hstack([X_train_chain, y_pred_train])
+                X_train_chain[f'pred_{i}'] = y_pred_train
 
                 if eval_set:
                     y_pred_val = model.predict(X_val_chain).reshape(-1, 1)
-                    X_val_chain[f'pred_{i}'] = y_pred_val #np.hstack([X_val_chain, y_pred_val])
+                    X_val_chain[f'pred_{i}'] = y_pred_val
 
+        # change fit
+        self.fitted = True
+
+        # return self
         return self
 
     def predict(self, X):
-        X = np.array(X)
+        assert self.fitted, 'Model not fitted! Call model.fit()'
+
+        # # copy features and containers for outputs
+        # X = np.array(X)
         X_chain = X.copy()
         preds = []
 
+        # loop through trained model list and collect results
         for model in self.models_:
             y_pred = model.predict(X_chain).reshape(-1, 1)
             preds.append(y_pred)
-            X_chain = np.hstack([X_chain, y_pred])
+            if self.chained:
+                X_chain[f'pred_{i}'] = y_pred #np.hstack([X_chain, y_pred])
 
         return np.hstack(preds)
 
     def save_model(self, path):
-        """Save the chained model to disk."""
+        """Save all model components to disk."""
+        
+        # make output dir
         os.makedirs(path, exist_ok=True)
 
+        # get metadata
         meta = {
             'n_targets': self.n_targets,
             'estimator_params': self.estimator_params,
@@ -121,26 +156,37 @@ class MultiOutputRegressor(BaseEstimator, RegressorMixin):
             'model_paths': []
         }
 
+        # save fitted models
         for idx, model in enumerate(self.models_):
             model_path = os.path.join(path, f"catboost_target_{idx}.cbm")
             model.save_model(model_path)
             meta['model_paths'].append(f"catboost_target_{idx}.cbm")
 
+        # save metadata
         with open(os.path.join(path, "metadata.json"), "w") as f:
             json.dump(meta, f)
 
     @classmethod
     def load_model(cls, path, base_estimator):
-        """Load the chained model from disk."""
+        """Load the model from disk."""
+        # get metadata
         with open(os.path.join(path, "metadata.json")) as f:
             meta = json.load(f)
 
-        model = cls(base_estimator = base_estimator, estimator_params = meta['estimator_params'], chained = meta['chained'], n_targets=meta['n_targets'])
+        # create base model
+        model = cls(
+            base_estimator = base_estimator, 
+            estimator_params = meta['estimator_params'], 
+            chained = meta['chained'], 
+            n_targets=meta['n_targets']
+        )
+        
+        # create model holder
         model.models_ = []
 
+        # read and load individual model files
         for model_file in meta['model_paths']:
-            # cbm = clone(base_estimator)
-            cbm = base_estimator()#**self.estimator_params)
+            cbm = base_estimator()
             cbm.load_model(os.path.join(path, model_file))
             model.models_.append(cbm)
 
@@ -148,7 +194,11 @@ class MultiOutputRegressor(BaseEstimator, RegressorMixin):
 
     def get_best_iter(self):
         return np.array([model.best_iter for model in self.models_])
+        
 def create_gbt_model(model_type = 'catboost', model_params = {}, chained = True):
+    """ Convenience function to support various gradient boosted trees
+    in multioutput regressor
+    """
     if model_type == 'catboost':
         base_model = cb.CatBoostRegressor#(*args, **kwargs)
     elif model_type == 'lightgbm':
@@ -224,11 +274,20 @@ class BaseRegressor(ABC):
         raise NotImplementedError
 
     def get_data(self, X, y, train_ids, val_ids):
+        """Get train and validation sets"""
         X_train, y_train = X.iloc[train_ids], y.iloc[train_ids]
         X_val, y_val = X.iloc[val_ids], y.iloc[val_ids]
         return X_train, X_val, y_train, y_val
 
     def cv_split(self, X, group):
+        """Creates cv split
+        Parameters
+        ---------
+        X : pd.DataFrame
+            Input data to split
+        group: np.array, list
+            group labels for samples
+        """
         if self.split_type == 'time_series':
             cvf = ContiguousTimeSeriesSplit(self.cv, 0.6)
         elif self.split_type == 'group_kfold':
@@ -239,7 +298,42 @@ class BaseRegressor(ABC):
 
 
 class GBTEnsembleRegressor(BaseRegressor):
-    def __init__(self, *args, model_type = 'catboost', lr = None, k = 12, chained = True, use_priors = False, enforce_location = True, location_column = None, min_patience = 20, **kwargs):
+    def __init__(
+        self, 
+        *args, 
+        model_type = 'catboost', 
+        lr = None, 
+        k = 12, 
+        chained = True, 
+        use_priors = False, 
+        enforce_location = True, 
+        location_column = None, 
+        min_patience = 20, 
+        **kwargs
+    ):
+        """
+        Parameters
+        ----------
+        model_type: str
+            Type of gradient boosted tree models. Currently supports only catboost. 
+            Future implements to support lightgbm, xgboost and sklearn estimators
+        lr : list of ints
+            Learning rates for the different folds
+        k : int
+            Number of k_neighbors in k_means clustering
+        chained: bool, default = True
+            If True, individual regressors are chained
+        use_priors: bool, default = True
+            If True, computes empirical flow priors as feature for prediction
+        enforce_location:  bool, default = True
+            If True, forces the model to consider location before all other features
+        location_column: str
+            Identifies the location column in data
+        min_patience: int
+            Early stopping criteria
+        kwargs: 
+            Arguments to pass to Base Regressor
+        """
         super().__init__(*args, **kwargs)
         self.lr = lr
         if self.lr is not None:
@@ -264,6 +358,7 @@ class GBTEnsembleRegressor(BaseRegressor):
         self.kmeans = None
 
     def _prep_kmeans_data(self, X):
+        ### prepare data for kmeans clustering
         assert 'station_code' in X.columns, 'X must contain `station_code` column!'
         assert 'longitude' in X.columns, 'X must containt `longitude` column!'
         assert 'latitude' in X.columns, 'X must contain `latitude` column!'
@@ -271,6 +366,7 @@ class GBTEnsembleRegressor(BaseRegressor):
         return data
 
     def _do_kmeans(self, X):
+        # kmeans clustering to group stations by geographical proximity
         X_ = self._prep_kmeans_data(X)
         km = Pipeline([
             ('scaler', MinMaxScaler()),
@@ -282,12 +378,15 @@ class GBTEnsembleRegressor(BaseRegressor):
     def _create_cluster_column(self, X, km, label_map = None):
         # copy dataset
         X = X.copy()
+        
         # prepare and predict label
         X_ = self._prep_kmeans_data(X[self.km_columns])
         X_['labels'] = km.predict(X_)
+        
         # align with label map
         if label_map is not None:
             X_['labels'] = X_['labels'].map(label_map)
+            
         # merge to original dataframe
         X['cluster'] = X.station_code.map(X_.labels.to_dict()).astype('category')
         return X
@@ -299,19 +398,19 @@ class GBTEnsembleRegressor(BaseRegressor):
         return label_map
         
     def fit(self, X, y, batch_size = 32, epochs = 100):
-
+        # COMPUTE GLOBAL VARIABLES
+        # get station priors to use during prediction
         self.stations_df = X.drop_duplicates(subset = 'station_code')[['station_code', 'river', 'location', 'river_ranking', 'latitude', 'longitude']]
         self.priors_df = self._compute_empirical_priors(X, y, target_col = 'water_flow_week_1')
 
-        # kmeans
+        # do kmeans on entire training dataset to get clusters in the prediction phase
         self.km_columns = [i for i in X.columns if ('water_flow' in i and 'trend' not in i) or i in ['latitude', 'longitude', 'station_code']]
         data = X[self.km_columns]
         self.km = self._do_kmeans(data)
         global_cluster_centers = self.km['kmeans'].cluster_centers_
         self.cat_features.append('cluster')
-    
         
-        # split the data into folds
+        # split the data into folds and train per fold
         splits = self.cv_split(X, X[self.cv_group])
 
         # loop through each fold
@@ -320,16 +419,24 @@ class GBTEnsembleRegressor(BaseRegressor):
             # get fold data
             X_train, X_val, y_train, y_val = self.get_data(X, y, train_ids, val_ids)
 
-            # do kmeans clustering
+            # KMEANS CLUSTERING
+            # do kmeans clustering per fold
             X_train_km_data = X_train[self.km_columns]
             km = self._do_kmeans(X_train_km_data)
+            
+            # align cluster labels with the global cluster labels
+            # to ensure alignment of cluster features during inference
             label_map = self._align_cluster_centers(global_cluster_centers, km['kmeans'].cluster_centers_)
             X_train = self._create_cluster_column(X_train, km, label_map)
             X_val = self._create_cluster_column(X_val, km, label_map)
+
+            # print info to console
             print('Training on years:', *sorted(X_train.year.unique()))
             print('Validating on years:', *sorted(X_val.year.unique()))
 
-            # get priors
+            # GET EMPIRICAL DATA PER FOLD. 
+            # compute oof priors
+            # apply priors to validation data
             if self.use_priors:
                 stations_df = X_train.drop_duplicates(subset = 'station_code')[['station_code', 'river', 'location', 'river_ranking', 'latitude', 'longitude']]
                 priors_df = self._compute_empirical_priors(X_train, y_train, target_col = 'water_flow_week_1')
@@ -339,7 +446,7 @@ class GBTEnsembleRegressor(BaseRegressor):
             # get station codes before preprocessing the data
             station_codes = X_val.station_code.values.tolist()
             
-            # preprocess data
+            # PREPROCESS DATA
             if self.preprocessor is not None:                
                 preprocessor = clone(self.preprocessor)
                 X_train_ = preprocessor.fit_transform(X_train)
@@ -354,10 +461,14 @@ class GBTEnsembleRegressor(BaseRegressor):
                 # save preprocessor
                 self.preprocessors[f'fold_{idx}'] = preprocessor
 
+            # prepare data for training
             X_train_ = self.prep_data_for_model(X_train_)
             X_val_ = self.prep_data_for_model(X_val_)
-            
+
+            # rename features
             self.feature_names_ = list(X_train_.columns)
+
+            # enforce location
             if self.enforce_location:
                 weights = self._get_feature_weights('location', self.feature_names_)
             else:
@@ -372,32 +483,34 @@ class GBTEnsembleRegressor(BaseRegressor):
                 for i in range(self.n_models):
                     print(f'Training model fold_{idx}_model_{i}')
                     # create model
-                    model = self.build_model(self.model_type, loss_function = losses[i], eval_metric = 'MAE', lr = self.lr[i], od_wait = od_wait[i], feature_weights = weights, random_state = self.random_state)  # use quantile loss
+                    model = self.build_model(
+                        self.model_type, 
+                        loss_function = losses[i], 
+                        eval_metric = 'MAE', 
+                        lr = self.lr[i], 
+                        od_wait = od_wait[i], 
+                        feature_weights = weights, 
+                        random_state = 
+                        self.random_state
+                    ) 
+                    
                     # fit model
                     model.fit(X_train_, y_train, eval_set = [(X_val, y_val)])
+                    
                     # store model
                     self.models[f'fold_{idx}_model_{i}'] = model
+                    
                     print('----------------------------------------------------')
+                    
                     # store X_val predictions for evaluation
                     pred = model.predict(X_val_)
                     pred = np.clip(pred, 0, np.inf)
                     y_out.append(pred)
+
+                # flatten outputs
                 y_pred = y_out[1].reshape(-1)
                 y_lower = y_out[0].reshape(-1)
                 y_upper = y_out[2].reshape(-1)
-
-                # # get conformal scores
-                # yv_ = y_val.values.reshape(-1)
-                # # yv_ = np.expm1(yv_)
-                # resids = np.maximum(y_lower - yv_, yv_ - y_upper) / (y_pred + 1)
-                # self.residuals_.extend(resids)
-                # delta = np.quantile(resids, self.alphas[1] - self.alphas[0])
-
-                # # adjust results
-                # y_out = np.sort(np.array([y_lower, y_pred, y_upper]), axis = 0)
-                # y_pred = y_out[1]
-                # y_lower = np.clip(y_out[0] - (delta * y_pred), 0, np.inf)  #self.delta
-                # y_upper = np.clip(y_out[2] + (delta * y_pred), 0, np.inf) + 0.01 #self.delta
        
             elif self.method == 'indirect':
                 y_out = []
@@ -429,27 +542,32 @@ class GBTEnsembleRegressor(BaseRegressor):
                     pred = model.predict(X_val_)
                     pred = np.clip(pred, 0, np.inf)
                     y_out.append(pred)
+                    
                 y_out = np.stack(y_out, axis = 1)
                 y_pred = np.mean(y_out, axis = 1).reshape(-1)
-                y_lower = np.quantile(y_out, self.alphas[0], axis = 1).reshape(-1) #- self.delta
-                y_upper = np.quantile(y_out, self.alphas[1], axis = 1).reshape(-1) #+ self.delta
+                y_lower = np.quantile(y_out, self.alphas[0], axis = 1).reshape(-1) 
+                y_upper = np.quantile(y_out, self.alphas[1], axis = 1).reshape(-1)
                 
             yv_ = y_val.values.reshape(-1)
 
-            # conformal calibration
+            # CONFORMAL CALIBRATION
+            # get relative residuals
             relative_residuals = np.maximum(y_lower - yv_, yv_ - y_upper) / (y_pred + 1e-2)
             residuals_df = pd.DataFrame({'cluster': np.repeat(X_val.cluster.values, y_val.shape[1]), 'residuals': relative_residuals})
+            
+            # store relative residuals
             self.residuals_.append(residuals_df)
 
             # compute residuals per cluster for each group
             residuals_per_cluster = residuals_df.groupby('cluster', observed = True).residuals.quantile(0.9)
             residuals_df['delta'] = residuals_df.cluster.map(residuals_per_cluster.to_dict()).astype('float')
             print('Empirical Coverage:', np.mean((y_lower <= yv_) & (y_upper >= yv_)))
-            
-            y_lower = np.clip(y_lower - (residuals_df.delta * y_pred), 0, np.inf) #self.delta
-            y_upper = np.clip(y_upper + (residuals_df.delta * y_pred), 0, np.inf) + 0.01 #self.delta
+
+            # calibrate quantiles
+            y_lower = np.clip(y_lower - (residuals_df.delta * y_pred), 0, np.inf) 
+            y_upper = np.clip(y_upper + (residuals_df.delta * y_pred), 0, np.inf) + 0.01 
                 
-            # compute per fold evaluation on nll
+            # COMPUTE OOF RESULTS
             # compute oof results
             y_true = y_val.values.reshape(-1)
             y_quantiles = np.array(list(zip(y_lower, y_upper)))
@@ -475,31 +593,42 @@ class GBTEnsembleRegressor(BaseRegressor):
 
     def predict(self, X):
         results = {}
+        
         # create a copy of the test set
         X = X.copy() 
         X = self._create_cluster_column(X, self.km, None)
+        
+        # compute priors
         if self.use_priors:
-            X = self._get_empirical_priors(X, self.priors_df, self.stations_df)                
+            X = self._get_empirical_priors(X, self.priors_df, self.stations_df)     
+
+        # get predictions
         for idx in range(self.cv):
             # copy the new data for each fold
             X_ = X.copy()
             if len(self.preprocessors) > 0:
+                # preprocess data
                 preprocessor = self.preprocessors[f'fold_{idx}']
                 X_ = preprocessor.transform(X_)
                 cols_ = preprocessor.get_feature_names_out()
                 cols = [col.split('__')[-1] for col in cols_]
                 X_ = pd.DataFrame(X_, columns = cols)
+                
+            # prep data for prediction
             X_ = self.prep_data_for_model(X_)
+
+            # loop through and get predictions
             for i in range(self.n_models):
                 model = self.models[f'fold_{idx}_model_{i}']
                 pred = np.clip(model.predict(X_), 0, np.inf)
                 results[f'fold_{idx}_model_{i}'] = pred
                 
-        # aggregate by method.
+        # AGGREGATE BY METHOD
+        # get results and residuals
         results_ = np.stack(list(results.values()), axis = 1)
         delta = X.cluster.astype(str).map(self.delta).values.reshape(-1, 1)
         if self.method == 'indirect':
-            mean_result = results_.mean(axis = 1) #np.median(results_, axis = 1) #
+            mean_result = results_.mean(axis = 1)
             q_1 = np.quantile(results_, q = self.alphas[0], axis = 1) - (delta * mean_result)
             q_3 = np.quantile(results_, q = self.alphas[1], axis = 1) + (delta * mean_result)
             out = {'pred' : mean_result, 'inf' : q_1, 'sup' : q_3}

@@ -9,6 +9,18 @@ from utils import load_config
 # from src.helpers import ContiguousGroupKFold
 
 def encode_location(lat, lon):
+    """Sinusoidal encoding of location coordinates
+    Parameters
+    ----------
+    lat: float
+        Latitude
+    lon: float
+        Longitude
+
+    Returns
+    -------
+    pd.Series: A series containing (sin(lat), cos(lat), sin(lon), cos(lon))
+    """
     lat_rad = np.radians(lat)  # Convert to radians
     lon_rad = np.radians(lon)
     
@@ -42,13 +54,22 @@ def main(is_mini = False):
         'ev_france' : FRANCE_EVAL,
         'ev_mini' : MINI_EVAL
     }
-
+    
+    # variable groups
+    LOCATION = ['longitude', 'latitude']
+    CATEGORICAL = ['station_code', 'river', 'hydro_region', 'hydro_sector', 'hydro_sub_sector', 'hydro_zone']
+    NUM_STATION = ['altitude', 'catchment']
+    NUM_SOIL = ['bdod', 'cfvo', 'clay', 'sand']
+    NUM_METEO = ['tp', 't2m', 'swvl1', 'evap']
+    DISCHARGE = 'discharge'
+    DATE = 'ObsDate'
+    
     # load the data
     df_ = {}
     for key, directory in datasets.items():
         df_[key] = pd.read_csv(directory)
 
-    # remove uncommon features
+    # remove uncommon features - features that are not present in train and eval sets.
     diff_col = set(df_['tr_brazil'].columns).symmetric_difference(set(df_['tr_france'].columns))
     for key in df_.keys():
         df_[key] = df_[key].drop(columns = diff_col, errors = 'ignore')
@@ -58,18 +79,11 @@ def main(is_mini = False):
     for key in df_.keys():
         df_[key] = df_[key].drop(columns = COLS_TO_DROP, errors = 'ignore')
 
-    LOCATION = ['longitude', 'latitude']
-    CATEGORICAL = ['station_code', 'river', 'hydro_region', 'hydro_sector', 'hydro_sub_sector', 'hydro_zone']
-    NUM_STATION = ['altitude', 'catchment']
-    NUM_SOIL = ['bdod', 'cfvo', 'clay', 'sand']
-    NUM_METEO = ['tp', 't2m', 'swvl1', 'evap']
-    DISCHARGE = 'discharge'
-    DATE = 'ObsDate'
-
     # create temporal features
     for key in df_.keys():
         # extract df
         temp = df_[key]
+        
         # convert to datetime and temporal features
         temp['ObsDate'] = pd.to_datetime(temp.ObsDate)
         temp['year'] = temp.ObsDate.dt.year
@@ -79,14 +93,17 @@ def main(is_mini = False):
         temp['week'] = temp.week.apply(lambda x: 1 if x > 52 else x)
     
         # compute new features 
-        # season
+        # season - winter: 1, spring - 2, summer - 3, autumn - 4
         temp['season'] = temp.month.apply(lambda x: (x-1) // 3 + 1) # 1, 2, 3, 4
     
-        # sinusoidial patterns
+        # seasonality patterns
+        # repeated gaussian patterns to mirror seasonality found in data
+        # compute repeating gaussians with varying widths(sigmas)
         sigmas = [4, 8]
         for sigma in sigmas:
             temp[f'gaussian_{sigma}'] =  np.exp(-(((temp.week + 23) % 52 - 52/2) ** 2) / (2 * sigma ** 2))
-        # enso patterns
+            
+        # enso patterns - model long term trends related to climate patterns 
         # enso_spans = [3, 4, 5, 6, 7]
         # for span in enso_spans:
         #     temp[f'enso_{span}_sin'] = np.sin(2 * np.pi * ((temp.year + temp.week)/52)/ span)
