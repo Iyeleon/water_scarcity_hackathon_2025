@@ -63,10 +63,10 @@ make feature_selection
 4. Training and inference
 Run train_model.ipynb
 
-🧪 Methodology
+## 🧪 Methodology
 The full modeling approach, including data preprocessing, causal analysis, feature selection, and model training, is described in detail in the 📄 project report.
 
-📈 Results
+## 📈 Results
 For detailed evaluation metrics, visualizations, and insights on model performance and generalization across regions, please refer to the 📄 report.
 
 
