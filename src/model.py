@@ -127,9 +127,6 @@ class MultiOutputRegressor(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         assert self.fitted, 'Model not fitted! Call model.fit()'
-
-        # # copy features and containers for outputs
-        # X = np.array(X)
         X_chain = X.copy()
         preds = []
 
@@ -138,7 +135,7 @@ class MultiOutputRegressor(BaseEstimator, RegressorMixin):
             y_pred = model.predict(X_chain).reshape(-1, 1)
             preds.append(y_pred)
             if self.chained:
-                X_chain[f'pred_{i}'] = y_pred #np.hstack([X_chain, y_pred])
+                X_chain[f'pred_{i}'] = y_pred 
 
         return np.hstack(preds)
 
@@ -200,12 +197,10 @@ def create_gbt_model(model_type = 'catboost', model_params = {}, chained = True)
     in multioutput regressor
     """
     if model_type == 'catboost':
-        base_model = cb.CatBoostRegressor#(*args, **kwargs)
+        base_model = cb.CatBoostRegressor
     elif model_type == 'lightgbm':
-        # base_model = lgbm.LGBMRegressor(*args, **kwargs)
         raise NotImplementedError
-    elif model_type == 'xgboost':
-        # base_model = xgb.XGBRegressor(*args, **kwargs)
+    elif model_type == 'xgboost':)
         raise NotImplementedError
     else:
         raise ValueError('Unsupported model type')
@@ -231,6 +226,60 @@ class BaseRegressor(ABC):
         patience = 5,
         split_type = 'time_series'
     ):
+        """
+        Initialize the ensemble quantile regression forecaster.
+    
+        Parameters
+        ----------
+        model_fn : callable, optional
+            A function that returns a new instance of the base model.
+        
+        model_params : dict, optional
+            Parameters to pass to the base model constructor.
+        
+        preprocessor : object or callable, optional
+            A data transformation pipeline or function to preprocess the input data.
+    
+        cv : int, default=5
+            Number of cross-validation splits.
+    
+        cv_group : str, default='year'
+            Column name to use for grouped time-based cross-validation (e.g., 'year').
+    
+        alphas : list of float, default=[0.05, 0.95]
+            List of quantiles to estimate. Should be in the range (0, 1).
+    
+        method : {'indirect', 'direct'}, default='indirect'
+            Quantile estimation method. 'indirect' means quantiles are derived from model prediction distribution.
+            'direct' refers to direct quantile regression (if supported by model).
+    
+        n_models : int, default=5
+            Number of models to train in the ensemble for each fold.
+    
+        cat_features : list of str, optional
+            List of categorical feature names. Used if the model supports categorical inputs.
+    
+        exclude_cols : list of str, optional
+            Columns to exclude from the feature set before training.
+    
+        random_state : int, default=42
+            Random seed for reproducibility.
+    
+        bootstrap : bool, default=True
+            Whether to use bootstrap sampling within each cross-validation fold to generate model diversity.
+    
+        delta : float, default=0.01
+            Minimum improvement in validation metric to continue training (used in early stopping).
+    
+        patience : int, default=5
+            Number of iterations with no improvement after which training is stopped (used in early stopping).
+    
+        split_type : {'time_series', 'group_kfold'}, default='time_series'
+            Type of cross-validation splitting strategy. 'time_series' assumes temporal ordering, 
+            'group_kfold' splits based on cv_group.
+            """
+        
+        
         self.model_fn = model_fn
         self.model_params = model_params
         self.preprocessor = preprocessor
@@ -246,8 +295,6 @@ class BaseRegressor(ABC):
         self.delta = delta
         self.patience = patience
         self.split_type = split_type
-        # if self.model_params is not None:
-        #     self.lr = self.model_params.pop('lr') if 'lr' in self.model_params.keys() else 0.01
 
         self.preprocessors = {}
         self.models = {}
@@ -309,6 +356,8 @@ class GBTEnsembleRegressor(BaseRegressor):
         enforce_location = True, 
         location_column = None, 
         min_patience = 20, 
+        ensemble_weights = None, 
+        spatio_temporal_split = False, 
         **kwargs
     ):
         """
@@ -331,6 +380,10 @@ class GBTEnsembleRegressor(BaseRegressor):
             Identifies the location column in data
         min_patience: int
             Early stopping criteria
+        ensemble_weights: list
+            Fold weights for ensembling
+        spatio_temporal_split: bool, False
+            Indicate whether to use spatio_temporal split for training
         kwargs: 
             Arguments to pass to Base Regressor
         """
@@ -349,8 +402,12 @@ class GBTEnsembleRegressor(BaseRegressor):
         if self.enforce_location:
             assert self.location_column is not None, '`location_column` is None! You must provide location_column present in your dataset'
         self.min_patience = min_patience
+        self.ensemble_weights = ensemble_weights if ensemble_weights else [0.05, 0.075, 0.125, 0.25, 0.5]
+        self.spatio_temporal_split = spatio_temporal_split
         self.results = {}
+        self.oof_preds = {}
         self.residuals_ = []
+        self.coverage = []
         self.feature_names_ = None
         self.stations_df = None
         self.priors_df = None
@@ -434,6 +491,13 @@ class GBTEnsembleRegressor(BaseRegressor):
             print('Training on years:', *sorted(X_train.year.unique()))
             print('Validating on years:', *sorted(X_val.year.unique()))
 
+            # SPATIO_TEMPORAL SPLIT
+            # random drop stations from france and brazil
+            if self.spatio_temporal_split:
+                drop_stations = ['6119040', '6939050', '6139921', '6139790', '5661000', '5685000']
+                X_train = X_train[~X_train.station_code.isin(drop_stations)]
+                y_train = y_train.loc[X_train.index]
+
             # GET EMPIRICAL DATA PER FOLD. 
             # compute oof priors
             # apply priors to validation data
@@ -508,9 +572,9 @@ class GBTEnsembleRegressor(BaseRegressor):
                     y_out.append(pred)
 
                 # flatten outputs
-                y_pred = y_out[1].reshape(-1)
-                y_lower = y_out[0].reshape(-1)
-                y_upper = y_out[2].reshape(-1)
+                y_pred = y_out[1]
+                y_lower = y_out[0]
+                y_upper = y_out[2]
        
             elif self.method == 'indirect':
                 y_out = []
@@ -519,7 +583,7 @@ class GBTEnsembleRegressor(BaseRegressor):
                     SEED = i + idx*100
                     print(f'Training model fold_{idx}_model_{i}')
                     # create model
-                    quantiles = norm.cdf(np.linspace(-0.5, 0.5, self.n_models))#np.linspace(-0.67449, 0.67449, self.n_models)
+                    quantiles = norm.cdf(np.linspace(-0.5, 0.5, self.n_models))
                     od_wait = np.clip(
                         (np.exp(-np.abs(np.arange(self.n_models) - (self.n_models / 2))) * self.patience).astype(int), 
                         self.min_patience, 
@@ -544,29 +608,49 @@ class GBTEnsembleRegressor(BaseRegressor):
                     y_out.append(pred)
                     
                 y_out = np.stack(y_out, axis = 1)
-                y_pred = np.mean(y_out, axis = 1).reshape(-1)
-                y_lower = np.quantile(y_out, self.alphas[0], axis = 1).reshape(-1) 
-                y_upper = np.quantile(y_out, self.alphas[1], axis = 1).reshape(-1)
+                y_pred = np.mean(y_out, axis = 1)
+                y_lower = np.quantile(y_out, self.alphas[0], axis = 1)
+                y_upper = np.quantile(y_out, self.alphas[1], axis = 1)
                 
-            yv_ = y_val.values.reshape(-1)
+            yv_ = y_val.values
 
             # CONFORMAL CALIBRATION
             # get relative residuals
             relative_residuals = np.maximum(y_lower - yv_, yv_ - y_upper) / (y_pred + 1e-2)
-            residuals_df = pd.DataFrame({'cluster': np.repeat(X_val.cluster.values, y_val.shape[1]), 'residuals': relative_residuals})
+            residuals_df = X_val_[['cluster', 'season']]
+            residuals_df[['week_1_residual', 'week_2_residual', 'week_3_residual', 'week_4_residual']] =  relative_residuals
             
-            # store relative residuals
-            self.residuals_.append(residuals_df)
+            # compute conformal factor per cluster and season 
+            residuals_per_cluster = residuals_df.groupby(
+                ['cluster', 'season'], observed = True )[['week_1_residual', 'week_2_residual', 'week_3_residual', 'week_4_residual']].quantile(0.9)
 
-            # compute residuals per cluster for each group
-            residuals_per_cluster = residuals_df.groupby('cluster', observed = True).residuals.quantile(0.9)
-            residuals_df['delta'] = residuals_df.cluster.map(residuals_per_cluster.to_dict()).astype('float')
-            print('Empirical Coverage:', np.mean((y_lower <= yv_) & (y_upper >= yv_)))
+            # compute fold weight in ensemble
+            residuals_df['weights'] = self.ensemble_weights[idx] / len(residuals_df)
 
-            # calibrate quantiles
-            y_lower = np.clip(y_lower - (residuals_df.delta * y_pred), 0, np.inf) 
-            y_upper = np.clip(y_upper + (residuals_df.delta * y_pred), 0, np.inf) + 0.01 
-                
+            # save to global residual
+            self.residuals_.append(residuals_df))
+
+            # COMPUTE FOLD METRICS DURING TRAINING
+            # apply conformal value per residual per season
+            for week in range(1, 5):
+                residuals_df[f'delta_{week}'] = residuals_df.apply(
+                    lambda x: residuals_per_cluster.loc[(x.cluster, x.season), f'week_{week}_residual'], axis = 1
+                ).astype('float')
+
+            fold_coverage = np.mean((y_lower <= yv_) & (y_upper >= yv_))
+            print('Empirical Coverage:', fold_coverage)
+            self.coverage.append(fold_coverage)
+
+            # calibrate fold quantiles - apply calibration per week
+            y_lower = np.clip(y_lower - (residuals_df[['delta_1', 'delta_2', 'delta_3', 'delta_4']] * y_pred), 0, np.inf)
+            y_upper = np.clip(y_upper + (residuals_df[['delta_1', 'delta_2', 'delta_3', 'delta_4']] * y_pred), 0, np.inf) + 0.01 
+             
+            self.oof_preds[idx] = {'X': X_val, 'y_true': y_val, 'y_pred': y_pred, 'y_lower': y_lower, 'y_upper': y_upper}
+
+            y_pred = y_pred.reshape(-1)
+            y_lower = y_lower.reshape(-1)
+            y_upper = y_upper.reshape(-1)
+            
             # COMPUTE OOF RESULTS
             # compute oof results
             y_true = y_val.values.reshape(-1)
@@ -585,11 +669,27 @@ class GBTEnsembleRegressor(BaseRegressor):
             print('-------------------------------------------------')
             print(f'Fold {idx} NLL:', nll, 'delta:', residuals_per_cluster.mean())
 
+        # FOLD TRAINING COMPLETE
         # get delta
         global_residuals = pd.concat(self.residuals_)
         self.delta = global_residuals.groupby('cluster').residuals.quantile(self.alphas[1] - self.alphas[0]).to_dict()
         self.delta = {str(k):float(v) for k, v in self.delta.items()}
         print('Conformal adjustment:', self.delta)
+
+        # COMPUTE CONFORMAL VALUE FOR INFERENCE
+        # Concatenate all residuals
+        global_residuals = pd.concat(self.residuals_)
+
+        # get the weights
+        weights = global_residuals.weights
+
+        # get quantile
+        q = self.alphas[1] - self.alphas[0]
+
+        # compute weighted quantile
+        self.delta = global_residuals.reset_index().groupby(['cluster', 'season']).apply(
+            lambda x: x[['delta_1', 'delta_2', 'delta_3', 'delta_4']].apply(lambda col: weighted_quantile(col, q, x['weights']))
+        )
 
     def predict(self, X):
         results = {}
@@ -624,23 +724,45 @@ class GBTEnsembleRegressor(BaseRegressor):
                 results[f'fold_{idx}_model_{i}'] = pred
                 
         # AGGREGATE BY METHOD
-        # get results and residuals
+        # get results and conformal values 
         results_ = np.stack(list(results.values()), axis = 1)
-        delta = X.cluster.astype(str).map(self.delta).values.reshape(-1, 1)
+
+        # loop through the conformal values and perform smoothing
+        # Each week is a weighted sum of the current week and the preceeding weeks
+        delta = []
+        for week in range(1, 5):
+            cols = [f'delta_{i}' for i in range(1, week + 1)]
+            weights = np.expand_dims(np.arange(1, week + 1), 0)
+            weights = weights / weights.sum()
+            mapper = (self.delta[cols] * weights).sum(axis = 1)
+            tmp_delta = X_.apply(lambda x: mapper.loc[(x.cluster, x.season)], axis = 1)
+            delta.append(tmp_delta)
+        delta = np.stack(delta, axis = 1)
+
         if self.method == 'indirect':
-            mean_result = results_.mean(axis = 1)
-            q_1 = np.quantile(results_, q = self.alphas[0], axis = 1) - (delta * mean_result)
-            q_3 = np.quantile(results_, q = self.alphas[1], axis = 1) + (delta * mean_result)
-            out = {'pred' : mean_result, 'inf' : q_1, 'sup' : q_3}
+            # compute weighted mean ensembling
+            weights = np.array([self.ensemble_weights]).reshape(1, 5, 1)
+            results__ = results_.reshape(X.shape[0], self.cv, self.n_models, -1)
+            mean_pred = (results__.mean(axis = 2) * weights).sum(axis = 1)
+
+            # get quantile and calibrate
+            q_1 = (np.quantile(results__, q = self.alphas[0], axis = (1, 2)))
+            q_1 = q_1 - (delta * mean_result)
+            q_3 = (np.quantile(results__, q = self.alphas[1], axis = (1, 2)))
+            q_3 = q_3 + (delta * mean_result)
+            out = {'pred' : mean_pred, 'inf' : q_1, 'sup' : q_3}
+            
         elif self.method == 'direct':
             results_ = results_.reshape(X.shape[0], self.cv, 3, -1)
             results_ = results_.mean(axis = 1)
             mean_pred = results_[:, 1, :]
+            # calibrate
             q_1 = results_[:, 0, :] - (delta * mean_pred)
             q_3 = results_[:, 2, :] + (delta * mean_pred)
             out = {'pred': mean_pred, 'inf': q_1, 'sup': q_3}
+            
         return out, results_
-
+    
     def save_model(self, save_path):
         os.makedirs(save_path, exist_ok=True)
 
@@ -672,6 +794,7 @@ class GBTEnsembleRegressor(BaseRegressor):
 
         self.priors_df.to_csv(os.path.join(save_path, 'priors.csv'), index = False)
         self.stations_df.to_csv(os.path.join(save_path, 'stations.csv'), index = False)
+        self.delta.reset_index().to_csv(os.path.join(save_path, 'delta.csv'), index = False)
     
         # save each model
         for name, model in self.models.items():
@@ -716,6 +839,8 @@ class GBTEnsembleRegressor(BaseRegressor):
 
         self.stations_df = pd.read_csv(os.path.join(load_path, 'stations.csv'))
         self.priors_df = pd.read_csv(os.path.join(load_path, 'priors.csv'))
+        self.delta = pd.read_csv(os.path.join(load_path, 'delta.csv'))
+        self.delta = self.delta.set_index(['cluster', 'season'])
 
         # Load models
         for fold in metadata['cv']:
@@ -789,7 +914,7 @@ class GBTEnsembleRegressor(BaseRegressor):
         elif self.model_type == 'lightgbm':
             raise NotImplementedError
         elif self.model_type == 'xgboost':
-            raise NotImplementError
+            raise NotImplementedError
         else:
             raise ValueError('Unsupported model type')
         return model

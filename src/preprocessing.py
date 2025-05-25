@@ -21,17 +21,24 @@ from src.helpers.data_loader import (
 )  
 
 def get_stations(area, data_dir, crs = 'epsg:4326'):
+    """
+    Gets station dataframe and includes flag for eval or train"""
+    
     # get train and eval stations
     stations_train = load_station_info(area, 'train', data_dir, crs = crs)
     stations_eval = load_station_info(area, 'eval', data_dir, crs = crs)
+    
     # eval has more stations than train. label stations present in eval only or both
     # common stations appear in both data
     common_stations = set(stations_train.station_code).intersection(stations_eval.station_code)
     stations_train['eval_only'] = False
     stations_eval['eval_only'] = stations_eval.station_code.apply(lambda x: False if x in common_stations else True)
+    
     return stations_eval
     
-def aggregate_hydro_data(hydro_data, join_info, stations, crs = 'epsg:4326'):        
+def aggregate_hydro_data(hydro_data, join_info, stations, crs = 'epsg:4326'): 
+    """ Aggregates hydro data at different scales"""
+    
     # loop through and update filter
     stations_ = stations.copy()
     for level, (col, lsuffix, rsuffix) in join_info.items():
@@ -69,6 +76,7 @@ def get_altitude(lat: float, lon: float, dem: xr.DataArray) -> float:
         return np.nan
         
 def get_watercourse_data(area, data_dir):
+    """Loads watercourse data"""
     # load watercourse
     # get filename
     if area == 'brazil':
@@ -81,9 +89,23 @@ def get_watercourse_data(area, data_dir):
     watercourse = gpd.read_file(watercourse_path)
     return watercourse
 
-def get_station_watercourse_ranking(area, watercourse, stations_gdf):
-    # get stations bound
-    # clip watercourse gdf
+def get_station_watercourse_ranking(area:str, watercourse, stations_gdf):
+    """Given an area, and watercourse df, gets the ranking of the rivers 
+    in the watercourse and present in stations_gdf
+    Parameters
+    ----------
+    area: str
+        One of brazil or france
+    watercourse: gpd.GeoDataFrame
+        watercouse geodataframe for the specified area
+    stations_gdf: gpd.GeoDataFrame
+        geodataframe containing station information
+
+    Returns
+    -------
+    gpd.GeoDataFrame with river_ranking column added
+    """
+    # get ranking column
     if area == 'brazil':
         ranking_col = 'nunivotcda'
     elif area == 'france':
@@ -91,9 +113,16 @@ def get_station_watercourse_ranking(area, watercourse, stations_gdf):
     else:
         raise ValueError('Invalid area. Must be one of france or brazil')
 
-    # clip to stations extent
+    # buffer station geometry to ensure intersection with river geometries
     buffer = stations_gdf.geometry.total_bounds
+
+    # clip to stations extent
     watercourse = gpd.clip(watercourse, buffer)
+
+    # select ranking by location
+    # select 3, 4, 5 in brazil
+    # select 1 - 4 in france
+    # subtract 2 from brazil to get similar rankings
     if area == 'brazil':
         watercourse = watercourse[watercourse[ranking_col].isin([3, 4, 5])]
         watercourse[ranking_col] = watercourse[ranking_col] - 2
@@ -102,13 +131,14 @@ def get_station_watercourse_ranking(area, watercourse, stations_gdf):
 
     # do spatial join with buffered station gdf
     stations_ = gpd.GeoDataFrame(stations_gdf, geometry = stations_gdf.buffer(0.0015))
-    ranking = watercourse.to_crs(stations_.crs).sjoin(stations_, predicate = 'intersects', how = 'right')
-    ranking = ranking.dropna(subset = ranking_col).drop_duplicates(subset = 'river')
-    ranking = ranking[['river', ranking_col]].rename(columns = {ranking_col : 'river_ranking'})
-    stations_gdf = stations_gdf.merge(ranking, on = 'river', how = 'left')
+    ranking_df = watercourse.to_crs(stations_.crs).sjoin(stations_, predicate = 'intersects', how = 'right')
+    ranking_df = ranking_df.dropna(subset = ranking_col).drop_duplicates(subset = 'river')
+    ranking_df = ranking_df[['river', ranking_col]].rename(columns = {ranking_col : 'river_ranking'})
+    stations_gdf = stations_gdf.merge(ranking_df, on = 'river', how = 'left')
     return stations_gdf
 
 def get_join_info(area):
+    """gets join information"""
     if area == "france":
             join_info = {
                 "region":    ("CdRegionHydro",      "_stations",      "_region"),
@@ -128,6 +158,29 @@ def get_join_info(area):
     return join_info
 
 def aggregate_meteo_data(data, stations_gdf, max_date, hydro_data, buffer_scales = None, crs = 'epsg:4326'):
+    """Extracts meteorological data from rio.xarray files and aggregates them to specified 
+    spatiotemporal scales
+
+    Parameters
+    ----------
+    data: xr.rio.xarray
+       xarray file containing the metereological data to extract 
+    stations_gdf : gpd.GeoDataFrame
+        stations geometry and information
+    max_date: str
+        Maximum date to extract data to
+    hydro_data: dict
+        dictionary containing hydro scales to aggregate to.
+    buffer_scales: list
+        optional spatial scales to aggregate to. specified in km.
+    crs : str
+        crs projection
+
+    Returns
+    -------
+    gpd.GeoDataFrame 
+    Spatiotemporally aggregated data
+    """
     # define output df
     df = None
 
@@ -148,16 +201,20 @@ def aggregate_meteo_data(data, stations_gdf, max_date, hydro_data, buffer_scales
             data_ = data_.rename({'e': 'evap'})
         data_ = data_[var]  # extract variable
         data_ = data_.rio.write_crs(crs) #project to crs
+        
         # loop 2 - stations loop
         for idx, row in stations_gdf.iterrows():
             lat, lon = row.geometry.y, row.geometry.x
+            
             # sample a single point (each point is sampled at 0.25 degrees approximately at 27km)
             sampled_values = data_.sel(latitude=lat, longitude=lon, method="nearest").to_dataframe().reset_index()
+            
             # Filter by date range
             sampled_values = sampled_values[sampled_values.valid_time <= max_date]
             sampled_values["station_code"] = row.station_code
             sampled_values = sampled_values[['station_code', 'valid_time', var]]
-            # loop 3 - sample at different buffer scales
+            
+            # loop 3 - sample at different buffer scales - local patterns
             for buffer in buffer_scales:
                 # select data within buffer
                 geom = row.geometry.buffer(buffer / 111) # convert kilometer to degrees
@@ -174,6 +231,8 @@ def aggregate_meteo_data(data, stations_gdf, max_date, hydro_data, buffer_scales
                     on=['station_code', "valid_time"],
                     how="left"
                 )
+
+            # loop 4 - sample at hydro zone scales - global patterns
             for geo_scale in hydro_data.keys():
                 hydro_ = hydro_data[geo_scale]
                 geom = [hydro_.loc[row[f'id_{geo_scale}']].geometry] 
@@ -257,11 +316,12 @@ def aggregate_soil_data(data, stations_gdf, hydro_data, buffer_scales = None):
                     mean_val = np.nan
                     std_val = np.nan
                     print(f"No data in bounds for {var}_{buffer}km")
-                # causes repetitive frame insert warning
-                # stations_gdf.loc[idx, f"{var}_{buffer}km_mean"] = mean_val
-                # stations_gdf.loc[idx, f"{var}_{buffer}km_std"] = std_val
                 means.append(mean_val)
                 stds.append(std_val)
+                
+                # free up memory
+                del clipped_data, mean_val, std_val
+                gc.collect
 
         for geo_scale in hydro_data.keys():
             hydro_ = hydro_data[geo_scale]
@@ -276,12 +336,14 @@ def aggregate_soil_data(data, stations_gdf, hydro_data, buffer_scales = None):
                 except NoDataInBounds:
                     mean_val = np.nan
                     std_val = np.nan
-                    print(f"No data in bounds for {var}_{geo_scale}")             
-                
-                # stations_gdf.loc[idx, f"{var}_{geo_scale}_mean"] = mean_val
-                # stations_gdf.loc[idx, f"{var}_{geo_scale}_std"] = std_val
+                    print(f"No data in bounds for {var}_{geo_scale}")            
                 means.append(mean_val)
                 stds.append(std_val)
+
+                # free up memory
+                del clipped_data, mean_val, std_val
+                gc.collect()
+
         mean_data.append(means)
         std_data.append(stds)  
 
