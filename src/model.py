@@ -200,7 +200,7 @@ def create_gbt_model(model_type = 'catboost', model_params = {}, chained = True)
         base_model = cb.CatBoostRegressor
     elif model_type == 'lightgbm':
         raise NotImplementedError
-    elif model_type == 'xgboost':)
+    elif model_type == 'xgboost':
         raise NotImplementedError
     else:
         raise ValueError('Unsupported model type')
@@ -628,7 +628,7 @@ class GBTEnsembleRegressor(BaseRegressor):
             residuals_df['weights'] = self.ensemble_weights[idx] / len(residuals_df)
 
             # save to global residual
-            self.residuals_.append(residuals_df))
+            self.residuals_.append(residuals_df)
 
             # COMPUTE FOLD METRICS DURING TRAINING
             # apply conformal value per residual per season
