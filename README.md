@@ -20,17 +20,28 @@ Streamflow forecasting is essential for understanding hydrological dynamics and 
 ├── data/ # Raw and processed data (or pointers to data sources)
 ├── notebooks/ # Jupyter notebooks (EDA, preprocessing, experiments)
 ├── src/
-│ ├── preprocessing/ # Modular preprocessing scripts
-│ ├── features/ # Feature engineering + selection logic
-│ ├── models/ # Model training, evaluation, and calibration
+│ ├── __init__.py
+| ├── helpers
+| |  ├── __init__.py
+| |  ├── data_loader.py
+| |  ├── data_split.py
+| |  ├── loss.py
+| |  ├── plots.py
+| |  └── scalers.py
+│ ├── preprocessing.py # Modular preprocessing scripts
+│ ├── feature_selection.py # Feature engineering + selection logic
+│ ├── model.py # Model training, evaluation, and calibration
 │ └── utils/ # Helper functions, logging, config
-├── results/ # Plots, tables, and outputs
+├── utils.py
+├── config.toml
+├── train_model.ipynb
+├── train_model_w_soil_features.ipynb
+├── performance_analysis.ipynb
+├── assets/images # Plots, tables, and outputs
 ├── Makefile # Orchestration of preprocessing steps
 ├── requirements.txt # Python dependencies
 └── README.md # You're here
 ```
-
-
 ---
 
 ## 🔧 Setup Instructions
@@ -61,7 +72,8 @@ make feature_selection
 ```
 
 4. Training and inference
-Run train_model.ipynb
+Run train_model.ipynb (LB Model)
+Run train_model_w_soil_features.ipynb (Second model - Better temporal scores, but overconfident on spatiotemporal data with tight prediction interval - reducing NLL score in spatiotemporal stations)
 
 ## 🧪 Methodology
 The full modeling approach, including data preprocessing, causal analysis, feature selection, and model training, is described in detail in the 📄 project report.
