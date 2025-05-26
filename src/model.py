@@ -224,7 +224,8 @@ class BaseRegressor(ABC):
         bootstrap = True,
         delta = 0.01,
         patience = 5,
-        split_type = 'time_series'
+        split_type = 'time_series',
+        min_split = 0.6
     ):
         """
         Initialize the ensemble quantile regression forecaster.
@@ -277,6 +278,9 @@ class BaseRegressor(ABC):
         split_type : {'time_series', 'group_kfold'}, default='time_series'
             Type of cross-validation splitting strategy. 'time_series' assumes temporal ordering, 
             'group_kfold' splits based on cv_group.
+
+        min_split: float, default = 0.6
+            Fraction of data in initial fold
             """
         
         
@@ -295,6 +299,7 @@ class BaseRegressor(ABC):
         self.delta = delta
         self.patience = patience
         self.split_type = split_type
+        self.min_split = min_split
 
         self.preprocessors = {}
         self.models = {}
@@ -648,8 +653,8 @@ class GBTEnsembleRegressor(BaseRegressor):
             self.oof_preds[idx] = {'X': X_val, 'y_true': y_val, 'y_pred': y_pred, 'y_lower': y_lower, 'y_upper': y_upper}
 
             y_pred = y_pred.reshape(-1)
-            y_lower = y_lower.reshape(-1)
-            y_upper = y_upper.reshape(-1)
+            y_lower = y_lower.values.reshape(-1)
+            y_upper = y_upper.values.reshape(-1)
             
             # COMPUTE OOF RESULTS
             # compute oof results
@@ -781,16 +786,21 @@ class GBTEnsembleRegressor(BaseRegressor):
             'model_type': self.model_type,
             'feature_names': self.feature_names_,
             'results': self.results,
+            'coverage': self.coverage,
             'delta': self.delta,
             'patience': self.patience,
             'min_patience': self.min_patience,
             'split_type': self.split_type,
+            'min_split': self.min_split,
             'chained': self.chained,
             'k': self.k,
             'km_columns': self.km_columns
         }
         with open(os.path.join(save_path, 'metadata.json'), 'w') as f:
             json.dump(metadata, f)
+
+        # save oof preds
+        joblib.dump(self.oof_preds, os.path.join(save_path, 'oof_preds.pkl'))
 
         self.priors_df.to_csv(os.path.join(save_path, 'priors.csv'), index = False)
         self.stations_df.to_csv(os.path.join(save_path, 'stations.csv'), index = False)
@@ -808,6 +818,8 @@ class GBTEnsembleRegressor(BaseRegressor):
         # save kmeans object
         joblib.dump(self.km, os.path.join(save_path, 'kmeans.pkl'))
 
+        
+
     def load_model(self, load_path, model_fn, model_params):
          # Load metadata
         with open(os.path.join(load_path, 'metadata.json'), 'r') as f:
@@ -823,10 +835,12 @@ class GBTEnsembleRegressor(BaseRegressor):
         self.model_type = metadata['model_type']
         self.feature_names_ = metadata['feature_names']
         self.results = metadata['results']
+        self.coverage = metadata['coverage']
         self.delta = metadata['delta']
         self.patience = metadata['patience']
         self.min_patience = metadata['min_patience']
         self.split_type = metadata['split_type']
+        self.min_split = metadata['min_split']
 
         self.model_fn = model_fn
         self.model_params = model_params
@@ -836,6 +850,8 @@ class GBTEnsembleRegressor(BaseRegressor):
         
         self.preprocessors = {}
         self.models = {}
+
+        self.oof_preds = joblib.load(os.path.join(load_path, 'oof_preds.pkl'))
 
         self.stations_df = pd.read_csv(os.path.join(load_path, 'stations.csv'))
         self.priors_df = pd.read_csv(os.path.join(load_path, 'priors.csv'))

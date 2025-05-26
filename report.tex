@@ -1,0 +1,813 @@
+\documentclass[a4paper,12pt]{article}
+
+\usepackage{subcaption}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{bookmark}
+\usepackage{geometry}
+\usepackage{amssymb}
+\usepackage{helvet}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\renewcommand{\familydefault}{\sfdefault} 
+% \usepackage{dingbat}
+% \geometry{margin=0.5in}
+\geometry{left=0.75in, right=0.75in, top=1.0in, bottom=0.75in}
+
+\title{Water Scarcity Hackathon - Phase 1 - Streamflow Forecasting}
+\author{Dami Akinniyi \textit{\(@yeleon\)}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section*{Abstract}
+This report presents the methodology, approach, and findings from the Capgemini Invent 
+Water Scarcity Hackathon. The project employs a hybrid causal inference and machine 
+learning framework to estimate the causal impact of streamflow drivers. 
+Leveraging CatBoost, a gradient boosting algorithm well-suited for handling categorical 
+variables and missing data, the model incorporates both dynamic and static data sources. 
+Causal analysis is used to identify influential features in time-varying data, while 
+Principal Component Analysis (PCA) is applied to reduce the dimensionality of static 
+variables. The model architecture includes a custom ensemble of gradient boosted trees, 
+optimized using time-series cross-validation to enhance robustness. Additionally, 
+per-fold Quantile Conformal Calibration is implemented to ensure reliable predictive 
+uncertainty and coverage.
+
+
+\section{Introduction}
+This project was developed as a response to the Streamflow Forecasting and Water 
+Resource Regulation Hackathon, 2025, organized by Capgemini Invent through Codabench. 
+The task was to build models to forecast water flow at stations on river basins in 
+France (Adour-Garonne, Rhône-Mediterranean) and Brazil (Doce River). It involved 
+predicting streamflow four weeks ahead using a combination of historical streamflow, 
+observed weather, and short-term weather forecasts.\\ 
+
+Traditional hydrological models, while effective, are often region-specific and 
+computationally intensive. In contrast, machine learning solutions focus on leveraging 
+rich datasets with lagged and contextual features to capture complex temporal and 
+spatial patterns. My approach leverages gradient boosting trees (CatBoost) combined 
+with a chained multi-output regression to model the spatio-temporal nature of 
+streamflow forecasting, explicitly accounting for dependencies across multiple future 
+time steps.\\
+
+The rest of this project details the data exploration, causal analysis to identify 
+direct drivers of streamflow, feature engineering, and modeling strategies tailored 
+to handle differing dynamics across locations. It concludes with an evaluation of 
+model performance and reflections on lessons learned for building robust, 
+interpretable streamflow forecasting models
+
+\section{Data Description}
+The dataset is also organized in three main splits - train, evaluation and mini challenge sets, 
+to support both temporal and spatio-temporal generalization tasks. The training set is used to train the
+model on historical data. The evaluation and mini-challenge sets consists of unseen temporal and Spatiotemporal
+stations to evaluate the model's performance on the public leaderboard.
+
+\renewcommand{\arraystretch}{1.5}
+\begin{table}[ht]
+\centering
+\begin{tabular}{|l|l|l|l|c|c|}
+    \hline
+    \textbf{Dataset Split} & \textbf{Country} & \textbf{Coverage} & \textbf{Num\_Stations} & \textbf{Temporal} & \textbf{Spatiotemporal} \\ \hline
+    Training        & France, Brazil & 1990--2003     & 39  & \checkmark & \\ \hline
+    Evaluation      & France, Brazil & 2004--2009     & 52 - (13 new) & \checkmark & \checkmark \\ \hline
+    Mini-challenge  & Brazil         & 2011--2015     & 2   &  & \checkmark \\ \hline
+\end{tabular}
+\caption{Dataset Structure and Coverage Summary}
+\label{tab:station_coverage}
+\end{table}
+\noindent This setup poses two main challenges: temporal robustness across seen stations 
+and generalization to unseen ones. This project addresses these through rigorous feature 
+analysis, thoughtful feature selection, and the incorporation of causal effects to 
+support reliable and responsive forecasting.
+
+\section{Methods and Approach} 
+This project follows a structured but iterative process, starting with data preprocessing and feature engineering, 
+followed by data exploration and causal analysis and finally feature selection, modelling experiments and evalutaion.
+This goal at all steps preceding the modelling phase is to uncover the most relevant features for predictive accuracy,
+while also ensuring that the model is interpretable and robust. The modelling phase focuses on iteratively testing different 
+architectures and hyperparameters to find the best performing model.
+
+\begin{figure}[htbp]
+    % \centering
+    \includegraphics[width=0.9\textwidth]{./assets/method.jpg}
+    \caption{Process Diagram}
+    \label{fig:process_diagram}
+\end{figure}
+
+\subsection{Data Preprocessing}
+Data preprocessing builds on the initial notebook provided in the Competition's Phase 1 GitHub repository, 
+extending it to consolidate and structure information from multiple data sources for downstream modeling.
+
+The workflow enhances the original preprocessing notebook by:
+\begin{itemize}
+    \item Integrating local spatial aggregation scales - 50km and 100km buffer scales
+    \item Sampling directly from xarray files for soil and meteorological data. This skips the spatial
+    interpolation step in the original notebook. 
+    \item modularizing and organizing all data preprocessing (for train, eval and mini-challenge) 
+    into executable scripts orchestrated by a Makefile pipeline for reproducibility and scalability.
+\end{itemize} 
+
+
+\subsection{Data Exploration}
+\subsubsection{Contexts, Datasets and Features}
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=1.0\textwidth]{./assets/images/brazil_hydrographic_levels.png}
+%     \label{fig:brazil_hydrographic_levels}
+% \end{figure}
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=1.0\textwidth]{./assets/images/france_hydrographic_levels.png}
+%     \caption{Boxplot comparing areas in the four geoscales in Brazil and France}
+%     \label{fig:france_hydrographic_levels}
+% \end{figure}
+\begin{figure}[htbp]
+    \centering
+
+    \begin{subfigure}[b]{1.0\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{./assets/images/brazil_hydrographic_levels.png}
+        \caption{Brazil}
+        \label{fig:brazil_hydrographic_levels}
+    \end{subfigure}
+
+    \vspace{1em} % Optional spacing between the two subfigures
+
+    \begin{subfigure}[b]{1.0\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{./assets/images/france_hydrographic_levels.png}
+        \caption{France}
+        \label{fig:france_hydrographic_levels}
+    \end{subfigure}
+
+    \caption{Spatial delineation of hydrological areas in Brazil (top) and France (bottom), across four hierarchical geoscales: region, sector, sub-sector, and zone.}
+    \label{fig:hydrographic_levels_combined}
+\end{figure}
+\subsubsection*{Hydrographic Areas}
+Hydrographic areas are defined hierarchically—region, sector, sub-sector, and zone. 
+While regions and sectors vary widely in land area across the two countries, sub-sectors 
+and zones exhibit greater spatial consistency, making them ideal for spatial feature 
+aggregation. However, high missingness at these finer scales requires careful imputation, 
+which we address using proximity-based filling from neighboring hydro regions.
+\begin{figure}[htbp]
+    \includegraphics[width=1.0\textwidth]{./assets/images/Boxplot of Average Areas per Geoscale per Location.png}
+    \caption{Boxplot comparing areas in the four geoscales in Brazil and France. The maps illustrate spatial variation in size and structure across regions, sectors, sub-sectors, and zones, highlighting differences in spatial consistency between the two countries.}
+    \label{fig:geoscale_averages_per_location}
+\end{figure}
+
+\subsubsection*{Location Based Features}
+Location features - (Latitude, Longitude, Altitude) are spatially diverse and capture distinct 
+geographic patterns across regions. These features support location-aware modeling and enhance 
+generalization across spatial contexts. They provide a foundation for learning region-specific 
+hydrological behavior.
+\begin{figure}[htbp]
+    \includegraphics[width=1.0\textwidth]{./assets/images/location_features_distribution.png}
+    \caption{Location-based features across the two countries.}
+    \label{fig:location_based_features}
+\end{figure}
+
+\subsubsection*{Rivers and Watersheds}
+Rivers are hierarchically ranked within each watershed, with lower values indicating higher-order rivers. 
+Brazil uses ranks 3–13, while France uses 1–7; we align these by subtracting 2 from Brazil’s ranks. 
+Rank 1 rivers in both countries show the highest average discharge. This calibrated river ranking offers a 
+valuable categorical spatial feature for modeling.
+\begin{figure}[htbp]
+    \centering
+
+    \begin{subfigure}[b]{1.0\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{./assets/images/watershed_river_ranking.png}
+        \caption{River / Stations Spatial Distribution}
+        \label{fig:river_ranking_map}
+    \end{subfigure}
+
+    \vspace{1em} % Optional spacing between the two subfigures
+
+    \begin{subfigure}[b]{1.0\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{./assets/images/river_ranking_average_discharge.png}
+        \caption{Average Discharge per River Rank}
+        \label{fig:river_ranking_average_discharge}
+    \end{subfigure}
+
+    \caption{Top: Spatial distribution of top-ranked rivers in each location. Bottom: Average river discharge by rank, highlighting the dominance of higher-ranked rivers across countries}
+    \label{fig:river_ranking}
+\end{figure}
+
+% \begin{itemize}
+%     \item Handling missing values
+%     \item Feature scaling or normalization
+%     \item Encoding categorical variables
+%     \item Feature engineering
+%     \item Feature selection - Low-variance spatial features act more like location labels than causal drivers.
+%     \item Causal inference methods
+% \end{itemize}
+
+\subsubsection{Soil Features}
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{1.0\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{./assets/images/soil_feature_profile_depth.png}
+        \caption{Soil Depth Profile}
+        \label{fig:soil_feature_profile_depth}
+    \end{subfigure}
+
+    \vspace{1em} % Optional spacing between the two subfigures
+
+    \begin{subfigure}[b]{1.0\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{./assets/images/soil_feature_profile_geoscale.png}
+        \caption{Soil Geoscales Profile}
+        \label{fig:soil_feature_profile_geoscale}
+    \end{subfigure}
+
+    \caption{Top: Heatmap of soil feature means and standard deviations across depth per soil group. Bottom: Heatmap of soil feature means and standard deviations across geoscales per soil group. Fairly consistent means across depths and geoscales indicate minimal variaton in average soil characteristics. }
+    \label{fig:soil_feature_profile}
+\end{figure}
+Soil features are static, with no temporal variability, limiting usage to spatial modeling
+This project builds on the soil aggregation methodology in the starter preprocessing notebook 
+by extending soil aggregation to incorporate both hydrological scales and buffer zones around 
+each station, enabling a multi-scale spatial understanding of soil properties. For each soil feature 
+layer, both mean values and standard deviations were computed to assess variation across depth levels 
+and geospatial units.\\ \\
+The mean values within soil feature groups were generally consistent across depths and geoscales, 
+indicating minimal variation in average soil characteristics. However, standard deviations 
+showed greater variability, particularly in the upper soil layers and at the sector scale. 
+These patterns were consistent across both regions, underscoring the need for careful feature
+selection to seperate discriminative features from noisy ones.
+
+\subsubsection{Climate Features}
+Climate data is aggregated at both the provided hydrological unit scale and within surrounding buffer zones to capture localized spatial variation. 
+Seasonal patterns are analyzed across locations, revealing consistent annual cycles across variables.
+\\ \\
+Importantly, temperature(t2m) and evapotranspiration (evap) show opposing seasonal trends between northern and southern 
+hemisphere sites due to their geographic positions. To address this, we account for hemispheric differences by enforcing 
+location-specific constraints within the model, ensuring that the model interprets seasonal features within the appropriate 
+spatial context. This prevents confusion from features that exhibit similar meanings but opposite temporal behaviors across regions.
+% Metereological Features
+% Historical Streamflow
+
+\subsubsection{Water Flow Patterns}
+Per-station analysis of water discharge reveals consistent flow patterns among stations located along the same river systems. 
+Across these stations, discharge exhibits strong annual seasonality with little to no long-term trend. This behavior suggests 
+empirical flow stationarity, indicating that historical discharge data remains representative of current conditions. To leverage 
+this, we compute the annual empirical flow — the historical mean discharge for each week of the year — and include it as a model 
+feature to capture expected seasonal behavior.
+
+For stations not present in the training set, we estimate this feature by taking a weighted mean of the empirical flows from the 
+two geographically nearest stations. This approach provides a reasonable proxy, allowing the model to generalize seasonal discharge 
+patterns to ungauged locations
+
+\subsubsection{Feature Engineering}
+
+Feature engineering plays a vital role in enhancing model performance by creating informative and predictive variables. The following techniques were applied to capture spatial, temporal, and seasonal dynamics in the data:
+
+\begin{itemize}
+    \item \textbf{Out-of-Fold (OOF) Features:} To avoid data leakage, certain features were computed using out-of-fold strategies during cross-validation. This includes:
+    \begin{itemize}
+        \item \textit{Empirical Flow:} Historical flow statistics aggregated using only training fold data.
+        \item \textit{KMeans Clustering:} Cluster assignments based on spatial or environmental patterns, generated per fold.
+    \end{itemize}
+    
+    \item \textbf{Lag Features:} Capture short-term dependencies by including past values of key variables (e.g., climate or flow).
+    
+    \item \textbf{Rolling Features:} Include rolling statistics (e.g., mean, variance) over time windows to capture temporal variability.
+    
+    \item \textbf{Seasonal Features:} Encode week-of-year using Gaussian basis functions (4 or 8 components) to represent cyclical seasonal patterns.
+    
+    \item \textbf{Temporal Features:} Include calendar-based indicators such as day, week, and month.
+    
+    \item \textbf{Categorical Features:} Metadata such as region, land use, and sensor type encoded as categorical variables.
+\end{itemize}
+
+\noindent\textbf{Total number of features after engineering:} \textit{[insert total here]}
+
+
+\subsection{Feature Selection}
+We perform feature selection to improve model robustness and reduce overfitting by identifying the most relevant predictors from different feature groups:
+\begin{itemize}
+    \item \textbf{Soil Features}: To reduce high dimensionality, we select a subset of informative and non-redundant soil variables using statistical and model-based methods. This streamlines the input space while retaining key spatial characteristics.
+    \item\textbf{Climate Features}: We prioritize causally relevant climate variables (e.g., precipitation, temperature, evapotranspiration) to promote model robustness and generalizability. This ensures the model focuses on features with direct influence on hydrological responses.
+\end{itemize}
+\subsubsection{Soil Features}
+To improve model performance and reduce feature redundancy, we implement a two-step feature selection approach:
+\begin{enumerate}
+    \item \textbf{Mutual Information Regression (MIR):} We compute MIR scores between each feature and the target variable. MIR is well-suited for 
+    identifying relevant soil features due to its ability to capture both linear and non-linear dependencies, which are common in hydrological and 
+    environmental data. We retain the top 10\% of features with the highest MIR scores, ensuring that the most informative predictors are preserved.
+    \item \textbf{Correlation Filtering:} Within the MIR-selected subset, we apply correlation filtering to remove redundant features. Feature pairs 
+    with a Pearson correlation coefficient greater than 0.9 are identified, and the feature with the lower MIR score (or lesser domain relevance) is 
+    removed. This reduces multicollinearity and improves model interpretability.
+\end{enumerate}
+\noindent This process yields a compact, non-redundant, and highly predictive feature set that captures both direct and complex interactions with the target variable.
+
+\subsubsection{Climate Features}
+To understand the relationship between climate features and the target variable across different spatial scales, we follow a multi-step approach:
+\begin{enumerate}
+    \item \textbf{Correlation Analysis:} We first analyze correlations at both local and global levels to identify 
+    general patterns and dependencies within the climate data.
+    \item \textbf{Structured Causal Models:} To move beyond correlation and uncover causal effects, we apply structured causal models across spatial scales, 
+    including local buffer zones and national regions. We estimate Average Treatment Effects (ATE) for key climate variables, quantifying their direct impact on the target 
+    while adjusting for confounders. Directed Acyclic Graphs (DAGs) consistently identify temperature and precipitation as key drivers across regions, with soil water volume (SWVL) 
+    emerging as a consistent driver in France. These findings are supported by counterfactual analyses that visualize potential outcomes under different climate conditions.
+    \item \textbf{Feature Importance:} Focusing on temperature, precipitation and swvl features, LightGBM is used to assess feature importance. Selecting the most predictive 
+    features within these groups at different scales helps the model better represent key climate drivers.
+\end{enumerate}
+\noindent This hybrid features that combine causal inference insights with machine learning predictions are expected to enhance model robustness by leveraging the strengths of both causal analysis and data-driven methods.
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{./assets/images/Brazil_sector_DAG.png}
+        \caption{Sector-level DAG for Brazil}
+        \label{fig:dag_brazil}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{./assets/images/france_sector_DAG.png}
+        \caption{Sector-level DAG for France}
+        \label{fig:dag_france}
+    \end{subfigure}
+    \caption{Learned Directed Acyclic Graphs (DAGs) at the sector level, showing causal relationships between climate variables and the target in Brazil and France.}
+    \label{fig:sector_dags}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{./assets/images/ATEs.png}
+    \caption{Estimated Average Treatment Effects (ATE) of key climate variables across spatial scales. Strong causal influence is observed from temperature and precipitation.}
+    \label{fig:ate_heatmap}
+\end{figure}
+
+\subsection {Modelling FrameWork}
+The core model is a Gradient Boosting Trees (GBT) regressor trained in a chained forecasting setup, where predictions from previous timesteps 
+(e.g., \(\hat{y}_{t-1}, \hat{y}_{t-2}\)) are chained into input features for predicting future values \(\hat{y}_t\). 
+This autoregressive structure enables multi-step forecasting while capturing temporal dependencies in the data.
+\\ \\
+To preserve temporal integrity, we use TimeSeriesSplit cross-validation. This ensures the model is always trained on past data and validated on future data. Each fold includes:
+\begin{itemize}
+    \item Computation of out-of-fold (OOF) and out-of-year (OOY) empirical flow statistics to avoid leakage.
+    \item Fold specific KMeans clustering to group stations into hydrologically and geographically similar clusters.
+    \item Fold-specific model training.
+    \item Validation residuals computed and conformal calibration factors computed per cluster and per week
+\end{itemize}
+
+\noindent At test time, predictions are aggregated by computing:
+\begin{itemize}
+    \item The mean forecast.
+    \item Quantiles (0.5, and 0.95) to characterize uncertainty.
+    \item Qantile Conformal Calibration step is applied to improve the coverage and reliability of forecast intervals
+\end{itemize}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.0\textwidth]{./assets/model_2.png}
+    \caption{Model Architecture}
+    \label{fig:model_diagram}
+\end{figure}
+
+\begin{algorithm}[H]
+\caption{Chained Ensemble Forecasting}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Feature matrix $X$, target series $y$, number of folds $C$, number of ensemble models $n$, number of clusters $k$, conformal quantile level $\alpha$
+\State \textbf{Output:} Forecasts with calibrated quantile intervals $\hat{y}$
+
+\State Compute global KMeans clusters on $X_{\text{train}}$
+\State Compute global empirical flow features per station $F$
+
+\For{each fold $c = 1, \dots, C$}
+    \State Split data into $X^{(k)}_{\text{train}}, X^{(k)}_{\text{val}}$ using ContiguousTimeSeriesSplit
+    \State Compute KMeans clusters on $X^{(k)}_{\text{train}}$ (per-fold clustering)
+    \State Align fold cluster IDs to global cluster ID
+    \State Compute OOF and OOY empirical flow features (excluding fold/year)
+    \State MinMax scaling of features to [0, 1]
+    
+    \For{each ensemble model $i = 1, \dots, n$}
+        \State Train chained GBT regressor on $X^{(k)}_{\text{train}}$
+        \State Predict on $X^{(k)}_{\text{val}}$ and store $\hat{y}^{(c,i)}$
+    \EndFor
+    
+    \State Aggregate fold predictions: mean and quantiles
+    \State Compute relative residuals $r^{(k)} = \frac{\hat{y}^{(k)} - y^{(k)}}{\hat{y}^{(k)} + \epsilon}$
+    \State Compute $d{t} = Quantile_{1-\alpha}(r^{(k)})$ for each week $w$
+    \State Store Conformal factors $d{t}$ for each cluster $c$ and week $w$
+\EndFor
+\State Preprocess test data $X_{\text{test}}$ using global clusters and empirical flow features
+\State Predict on $X_{\text{test}}$ using the trained ensemble models
+\State Compute mean and quantiles of predictions $\hat{y}_{\text{test}}$
+\State Smooth conformal factors using weekly temporal blending.
+\State Calibrate quantile intervals using smoothed conformal factors.
+\State Return ensemble forecasts with calibrated intervals
+\end{algorithmic}
+\end{algorithm}
+
+
+\subsubsection{ContiguousTimeSeriesSplit Cross Validation}
+This validation strategy builds upon the \texttt{TimeSeriesSplit} approach from \textsc{scikit-learn}, where each fold's training set is a strict superset of the previous one, preserving the temporal ordering of the data. However, our method introduces two key modifications:
+
+\begin{itemize}
+    \item \textbf{Contiguous Validation:} Instead of using a fixed-size validation block for each fold, we validate on all remaining data after the training split. This allows the model to be assessed on the full available future horizon, improving robustness and generalization assessment.
+    
+    \item \textbf{Minimum Training Size:} A constraint is imposed such that the first training fold must contain at least 50\% of the dataset. This ensures sufficient historical context is available for the initial training phase, preventing unstable model estimates due to data sparsity.
+\end{itemize}
+
+The fold structure for a 5-fold setup with years ranging from 1990 to 2004 is defined as follows:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{|c|c|c|}
+\hline
+\textbf{Fold} & \textbf{Training Years} & \textbf{Validation Years} \\
+\hline
+1 & 1990--1998 & 1999--2004 \\
+2 & 1990--1999 & 2000--2004 \\
+3 & 1990--2000 & 2001--2004 \\
+4 & 1990--2001 & 2002--2004 \\
+5 & 1990--2002 & 2003--2004 \\
+\hline
+\end{tabular}
+\caption{Contiguous expanding time series cross-validation structure.}
+\end{table}
+
+This approach ensures that:
+\begin{itemize}
+    \item Each model is trained only on past data relative to the validation set.
+    \item The training window expands over time, simulating a real-world forecasting scenario.
+    \item The evaluation is performed on all future data from the training endpoint, leading to more realistic performance metrics.
+\end{itemize}
+
+\subsubsection{Data-Aware Clustering}
+To group stations into hydrologically similar regimes, we apply KMeans clustering on the full training data using a 
+fixed number of clusters \( k \). This yields a global clustering structure that informs both model predictions and 
+residual calibration.\\
+To avoid data leakage in time series cross-validation, KMeans is recomputed independently within each training fold. 
+Since the cluster centers may vary between the global and fold-specific KMeans, we align them using the Hungarian 
+algorithm. The alignment minimizes the total Euclidean distance between fold-specific cluster centers 
+\( C^{\text{fold}} \) and global cluster centers \( C^{\text{global}} \):
+
+\begin{equation}
+\min_{\pi \in \text{Perm}(k)} \sum_{i=1}^{k} \left\| C^{\text{fold}}_i - C^{\text{global}}_{\pi(i)} \right\|_2
+\end{equation}
+
+where \( \pi \) is a permutation of cluster indices. The aligned cluster IDs are then used to condition predictions and compute localized residual statistics.
+
+\begin{algorithm}[h!]
+\caption{Data-Aware Global Clustering and Alignment}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Training data \( X \), number of clusters \( k \), number of CV folds \( F \)
+\State Fit global KMeans on \( X \) to obtain centers \( C^{\text{global}} \) and cluster IDs
+\For{each fold \( f = 1 \) to \( F \)}
+    \State Extract fold-specific training data \( X^{(f)} \)
+    \State Fit KMeans on \( X^{(f)} \) to get centers \( C^{(f)} \)
+    \State Compute cost matrix \( M_{ij} = \lVert C^{(f)}_i - C^{\text{global}}_j \rVert_2 \)
+    \State Use Hungarian algorithm to solve:
+    \[
+        \min_{\pi \in \text{Perm}(k)} \sum_{i=1}^{k} M_{i,\pi(i)}
+    \]
+    \State Map fold-specific cluster IDs using optimal assignment \( \pi \)
+    \State Assign aligned cluster labels to \( X^{(f)} \)
+\EndFor
+\State \textbf{Output:} Data with global-aligned cluster IDs for each fold
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Empirical Flow Features}
+Empirical flow statistics are computed as the mean discharge per station and week, excluding the target year to prevent leakage. During training, global empirical flow is calculated and stored. After data splitting, empirical flow is recomputed using only the training fold data.
+
+The inference function \texttt{\_get\_empirical\_prior} assigns empirical flow values for each data point as follows:
+
+\begin{enumerate}
+    \item If the station exists in the training priors, assign its empirical flow directly.
+    \item Otherwise, estimate empirical flow by weighted averaging of the two nearest neighbor stations:
+    \begin{itemize}
+        \item Neighbors are selected based on river proximity, river ranking, and geographic location.
+        \item Euclidean distances on latitude and longitude are computed to find the nearest neighbors.
+        \item Weights are inverse-distance weighted to combine neighbors' empirical flows smoothly.
+    \end{itemize}
+\end{enumerate}
+
+\noindent This method provides stable, leakage-free empirical priors for both seen and unseen stations during training and inference.
+
+\bigskip
+
+\begin{algorithm}[H]
+\caption{Empirical Flow Feature Extraction}
+\begin{algorithmic}[1]
+\Require Dataframe $X$ with columns \texttt{week, year, station\_code}, empirical flow priors \texttt{priors}, station metadata \texttt{stations\_gdf}
+\Ensure Dataframe $X$ augmented with empirical flow prior \texttt{empirical\_flow}
+
+\State Assert columns \texttt{week, year, station\_code} exist in $X$
+\State Copy $X$ to avoid modifying input
+\ForAll{unique stations $s$ in $X$}
+    \If{$s$ in columns of \texttt{priors}}
+        \State Extract empirical flow data for station $s$
+    \Else
+        \State Find neighbors for $s$ by:
+        \begin{itemize}
+            \item Filtering stations with the same river and similar river ranking and location
+            \item Calculating Euclidean distance based on latitude and longitude
+            \item Selecting two nearest neighbors
+        \end{itemize}
+        \State Compute inverse distance weights for neighbors
+        \State Compute weighted average of neighbors' empirical flow by week
+    \EndIf
+    \State Append station empirical flow data to results
+\EndFor
+\State Merge empirical flow results into $X$ by \texttt{station\_code} and \texttt{week}
+\State \Return augmented $X$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Relative Quantile Conformal Calibration} 
+To address heteroscedasticity and the varying magnitudes of streamflow across regions and seasons, 
+we propose \textbf{Relative Quantile Conformal Calibration (RQCC)} — an extension of conformal quantile 
+calibration that adjusts prediction intervals using residuals scaled relative to the target value.
+\\ \\ 
+In standard quantile conformal prediction, coverage is achieved by computing residuals between predicted 
+quantile bounds and observed values. For a model that outputs lower and upper quantile predictions 
+$\hat{y}_t^{\text{lower}}$ and $\hat{y}_t^{\text{upper}}$, the standard conformal residual is:
+
+\begin{equation}
+r_t = \min\left( \hat{y}_t^{\text{upper}} - y_t,\; y_t - \hat{y}_t^{\text{lower}} \right)
+\label{eq:absolute_residual}
+\end{equation}
+
+\noindent Using these residuals, the calibrated prediction interval is:
+
+\begin{equation}
+\left[ \hat{y}_t^{\text{lower}} - q_{1-\alpha},\; \hat{y}_t^{\text{upper}} + q_{1-\alpha} \right]
+\label{eq:standard_interval}
+\end{equation}
+where $q_{1-\alpha}$ is the $(1 - \alpha)$-quantile of residuals from a held-out calibration set.
+\\
+\noindent However, in real-world hydrological applications, streamflow values can vary drastically 
+between basins — from small ephemeral streams to major rivers. Applying absolute residuals in such 
+cases results in mis-scaled intervals: overly wide in high-flow regimes and too narrow in low-flow areas. 
+This undermines the interpretability and sharpness of calibrated intervals.
+\\ \\ 
+To normalize across such variation in target magnitudes, we define \textbf{relative residuals}:
+\begin{equation}
+r_t^{\text{rel}} = \frac{\min\left( \hat{y}_t^{\text{upper}} - y_t,\; y_t - \hat{y}_t^{\text{lower}} \right)}{y_t + \epsilon}
+\label{eq:relative_residual}
+\end{equation}
+where $\epsilon > 0$ is a small constant (e.g., $10^{-6}$) added for numerical stability.
+\\
+Residuals are then grouped by \textbf{cluster} $c$ (e.g., hydrological regime) and \textbf{timestep} 
+$t$ (e.g., season), and the conformal quantile is computed per group:
+\begin{equation}
+\delta_{c, t} = \text{Quantile}_{1 - \alpha} \left( \left\{ r_t^{\text{rel}} \right\}_{i \in \text{cluster } c} \right)
+\label{eq:cluster_quantile}
+\end{equation}
+
+\noindent Finally, these relative quantile factors $\delta_{c, t}$ are used to expand the predicted interval proportionally:
+
+\begin{equation}
+\left[
+\hat{y}_t^{\text{lower}} - \delta_{c, t} \cdot (y_t + \epsilon),\;
+\hat{y}_t^{\text{upper}} + \delta_{c, t} \cdot (y_t + \epsilon)
+\right]
+\label{eq:relative_interval}
+\end{equation}
+\noindent This formulation maintains correct coverage while adapting to local flow characteristics, producing interpretable and consistent intervals across space and time.
+
+
+\section{Experiments and Results}
+\subsection{Experimental Setup}
+We evaluate two variants of our model to assess the impact of soil features:
+\begin{itemize}
+    \item \textbf{Model A:} CatBoost model with the full feature set, including soil features.
+    \item \textbf{Model B:} CatBoost model excluding all soil-related features.
+\end{itemize}
+
+Both models are trained using CatBoost with a quantile regression objective (quantile $\alpha=0.1$).
+
+\paragraph{Validation Strategy}  
+We employ a 5-fold contiguous cross-validation scheme with fold expansion. The splits are made by year to preserve temporal order and prevent data leakage.
+
+\paragraph{Evaluation Metrics}  
+Model performance is evaluated using:
+\begin{itemize}
+    \item Negative Log-Likelihood (NLL)
+    \item Interval Coverage (calibration of predicted quantiles)
+\end{itemize}
+
+This setup allows comparison of predictive accuracy, uncertainty quantification, and calibration between models with and without soil features.
+
+\begin{table}[htbp]
+\centering
+\label{tab:metrics_comparison}
+\begin{tabular}{lcccc}
+\hline
+\textbf{Model} & \textbf{OOF NLL} & \multicolumn{3}{c}{\textbf{Leaderboard Score}} \\
+\cline{3-5}
+ & & \textbf{Coverage} & \textbf{Temporal Split} & \textbf{SpatioTemporal Split} \\
+\hline
+A - \textit{With Soil Features} & \textbf{1.568} & \textbf{0.904} & \textbf{2.63} & 3.18 \\
+B - \textit{Without Soil Features} & 1.572 & 0.900 & 2.65 & \textbf{3.05} \\
+\end{tabular}
+\caption{Performance Metrics Comparison of Models With and Without Soil Features}
+\end{table}
+
+
+\subsection{Explainability}
+In this study, we focus on feature importance analyses aggregated across folds and weeks to interpret the model’s global behavior and temporal variation. While advanced explainability methods like SHAP values provide detailed local and global insights, they were not used here due to computational constraints and the complexity introduced by our ensemble model with multiple folds and repetitions.
+\\
+\noindent Instead, we rely on aggregated feature importance scores and causal Average Treatment Effects (ATEs) from the feature selection phase to capture variable influence on model predictions. Further explainability analyses, including residual diagnostics and local interpretability methods, remain valuable avenues for future work to enhance understanding of model performance and error characteristics.
+
+\subsubsection{Global Feature Importance}
+Feature importances are computed using the average feature importances across all models in the ensemble.
+\begin{figure}[ht]
+\centering  
+\includegraphics[width=1.0\textwidth]{./assets/images/global_feature_importance.png}
+\caption{Global Feature Importance for the Model with Soil Features. The top 10 features are shown, with empirical flow and water flow lag features dominating the importance scores.}
+\label{fig:global_feature_importance}
+\end{figure}
+
+\subsubsection{Top Feature Importances per Fold and Week}
+Feature importances are computed for each fold separately, allowing us to observe how feature relevance varies 
+across different training and validation sets. The top 10 features per fold are summarized in Table \ref{tab:feat_importance_ranks_fold}, 
+and Table \ref{tab:feat_importance_ranks_weeks} showing both their importance values and ranks within each fold and week.
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lccccc}
+\hline
+\textbf{Feature} & \textbf{Fold 1} & \textbf{Fold 2} & \textbf{Fold 3} & \textbf{Fold 4} & \textbf{Fold 5} \\
+\hline
+water\_flow\_lag\_1w           & 15.29 (1) & 16.73 (1) & 16.76 (1) & 16.51 (1) & 16.55 (1) \\
+empirical\_flow               & 6.75 (2)  & 7.06 (2)  & 7.39 (2)  & 5.97 (2)  & 7.46 (2) \\
+water\_flow\_rolling\_min\_4w & 6.12 (3)  & 4.98 (3)  & 5.44 (3)  & 4.18 (4)  & 3.85 (3) \\
+water\_flow\_rolling\_mean\_4w & 3.66 (4)  & 3.36 (4)  & 2.78 (5)  & 3.70 (3)  & 2.56 (4) \\
+tp\_region                   & 1.02 (7)  & 1.03 (5)  & 0.96 (6)  & 1.08 (6)  & 1.06 (6) \\
+swvl1\_region                & 0.90 (8)  & 0.99 (6)  & 0.92 (7)  & 1.17 (5)  & 0.80 (7) \\
+water\_flow\_lag\_2w           & 1.12 (6)  & 0.86 (9)  & 0.92 (8)  & 0.88 (7)  & 1.15 (5) \\
+water\_flow\_lag\_3w           & 0.75 (9)  & 0.88 (7)  & 0.71 (10) & 0.77 (8)  & 0.50 (9) \\
+water\_flow\_lag\_4w           & 0.64 (10) & 0.64 (10) & 0.75 (9)  & 0.77 (9)  & 0.62 (8) \\
+water\_flow\_rolling\_max\_4w & 1.62 (5)  & 0.64 (11) & 1.02 (5)  & 0.72 (10) & -         \\
+water\_flow\_rolling\_std\_4w & -         & 0.86 (8)  & -         & 0.68 (11) & -         \\
+tp\_region\_lag\_1w           & -         & -         & -         & -         & 0.50 (10) \\
+\hline
+\end{tabular}
+\caption{Top feature importances (values) and ranks (in parentheses) per fold. "-" indicate feature not in top 10 for corresponding fold.}
+\label{tab:feat_importance_ranks_folds}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\hline
+\textbf{Feature} & \textbf{Week 1} & \textbf{Week 2} & \textbf{Week 3} & \textbf{Week 4} \\ 
+\hline
+water\_flow\_lag\_1w & 15.84 (1) & 17.22 (1) & 17.05 (1) & 15.35 (1) \\
+empirical\_flow & 6.91 (2) & 7.02 (2) & 6.32 (2) & 7.45 (2) \\
+water\_flow\_rolling\_min\_4w & 5.86 (3) & 5.34 (3) & 4.21 (3) & 4.24 (3) \\
+water\_flow\_rolling\_mean\_4w & 3.57 (4) & 3.17 (4) & 3.28 (4) & 2.83 (4) \\
+tp\_region & 1.05 (7) & 0.96 (5) & 1.02 (6) & 1.1 (5) \\
+swvl1\_region & 0.95 (8) & 0.93 (6) & 1.13 (5) & 0.81 (7) \\
+water\_flow\_rolling\_max\_4w & 1.34 (5) & 0.91 (7) & 0.81 (8) & - \\
+water\_flow\_lag\_2w & 1.11 (6) & 0.88 (8) & 0.9 (7) & 1.05 (6) \\
+water\_flow\_lag\_4w & - & - & 0.81 (9) & 0.6 (8) \\
+tp\_region\_rolling\_sum\_3w & - & - & - & 0.52 (9) \\
+water\_flow\_rolling\_std\_4w & 0.93 (9) & - & - & 0.52 (10) \\
+water\_flow\_lag\_3w & 0.82 (10) & 0.71 (9) & 0.65 (10) & - \\
+tp\_region\_lag\_1w & - & 0.62 (10) & - & - \\
+\hline
+\end{tabular}
+\caption{Top feature importances (values) and ranks (in parentheses) per week. "-" indicates feature not in top 10 for corresponding week.}
+\label{tab:feat_importance_ranks_weeks}   
+\end{table}
+\noindent The tables show that water flow lag features consistently rank among the top predictors across folds and weeks, indicating their strong temporal influence on streamflow. Empirical flow also remains a key feature, reflecting its importance as a hydrological prior. Other features such as rolling statistics and regional climate variables vary in importance depending on the fold or week, suggesting that local hydrological conditions and seasonal patterns significantly affect model predictions.
+
+\subsection{Robustness}
+\label{sec:robustness}
+
+Given the model's complexity and reliance on diverse features, we assess robustness across three dimensions: out-of-fold consistency, spatiotemporal generalization, and interval reliability.
+
+\subsubsection{Out-of-Fold Validation}
+
+We evaluate the model's performance across five validation folds to ensure stable behavior across different training splits. Table~\ref{tab:mae_per_fold_week} reports the Mean Absolute Error (MAE) for each week.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{Week 1} & \textbf{Week 2} & \textbf{Week 3} & \textbf{Week 4} \\
+\hline
+fold\_1 & 14.300 & 17.446 & 24.149 & 27.747 \\
+fold\_2 & 14.387 & 17.384 & 24.414 & 27.469 \\
+fold\_3 & 14.008 & 17.205 & 24.654 & 27.470 \\
+fold\_4 & 14.125 & 17.065 & 25.264 & 28.311 \\
+fold\_5 & 12.005 & 16.657 & 23.105 & 22.378 \\
+\hline
+\end{tabular}
+\caption{Mean Absolute Error (MAE) per fold and week on the out-of-fold validation set.}
+\label{tab:mae_per_fold_week}
+\end{table}
+
+\noindent The model maintains consistent performance across folds, with lower errors in later folds—likely due to more historical data becoming available (see Table~\ref{tab:mae_per_fold_week}). Errors increase with forecasting horizon, reflecting compounding uncertainty and growing temporal distance from observed lags.
+
+\subsubsection{Spatiotemporal Generalization}
+
+To evaluate the model's ability to generalize across spatial and temporal domains, we introduce a held-out spatiotemporal validation split. This includes four stations from France and two from Brazil, excluded entirely from training. Table~\ref{tab:spatiotemporal_generalization_aggregated} shows MAE across weeks on this combined set.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\hline
+\textbf{Fold} & \textbf{Week 1} & \textbf{Week 2} & \textbf{Week 3} & \textbf{Week 4} \\
+\hline
+fold\_1 & 14.677 & 18.508 & 26.391 & 29.732 \\
+fold\_2 & 14.584 & 18.778 & 26.164 & 30.165 \\
+fold\_3 & 14.893 & 18.533 & 26.309 & 29.712 \\
+fold\_4 & 15.025 & 19.117 & 27.309 & 30.653 \\
+fold\_5 & 13.129 & 17.930 & 24.705 & 23.950 \\
+\hline
+\end{tabular}
+\caption{Aggregated spatiotemporal generalization performance on held-out stations and temporal split.}
+\label{tab:spatiotemporal_generalization_aggregated}
+\end{table}
+
+\noindent As shown in Table~\ref{tab:spatiotemporal_generalization_aggregated}, performance degrades slightly on the spatiotemporal set, though it remains within acceptable bounds. To provide fairer comparisons across stations, we report station-normalized MAE in Table~\ref{tab:spatiotemporal_generalization}.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\hline
+\textbf{Split} & \textbf{Week 1} & \textbf{Week 2} & \textbf{Week 3} & \textbf{Week 4} \\
+\hline
+Temporal\_split & \textbf{0.287} & \textbf{0.464} & 0.569 & \textbf{0.605} \\
+Spatio\_temporal\_split & 0.348 & 0.485 & \textbf{0.564} & \textbf{0.605} \\
+\hline
+\end{tabular}
+\caption{Station-normalized MAE across weeks for temporal and spatiotemporal splits.}
+\label{tab:spatiotemporal_generalization}
+\end{table}
+
+\noindent The normalized MAE in Table~\ref{tab:spatiotemporal_generalization} shows slightly better results on the temporal split, but the gap is narrow—highlighting the model’s generalization ability even on unseen spatial regions.
+
+\subsubsection{Prediction Interval Width}
+
+We also assess uncertainty calibration via the prediction interval width, normalized per station. Results are presented in Table~\ref{tab:normalized_interval_width}.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\hline
+\textbf{Split} & \textbf{Week 1} & \textbf{Week 2} & \textbf{Week 3} & \textbf{Week 4} \\
+\hline
+Temporal\_split & 1.178 & 1.671 & 1.889 & 1.969 \\
+Spatio\_temporal\_split & 1.188 & 1.651 & 1.746 & 1.763 \\
+\hline
+\end{tabular}
+\caption{Station-normalized prediction interval width across weeks for temporal and spatiotemporal splits.}
+\label{tab:normalized_interval_width}
+\end{table}
+
+\noindent As shown in Table~\ref{tab:normalized_interval_width}, prediction intervals are slightly tighter for spatiotemporal splits, which may lead to undercoverage and elevated NLL scores. This suggests that while the model is confident, it may be underestimating uncertainty on unseen stations.
+
+\subsubsection{Discussion on Generalization and Uncertainty}
+
+The observed gap between out-of-fold and leaderboard scores highlights key opportunities for improvement. Strong out-of-fold performance (Table~\ref{tab:mae_per_fold_week}) provides a solid foundation, while the results on unseen stations (Tables~\ref{tab:spatiotemporal_generalization}, \ref{tab:normalized_interval_width}) emphasize areas for better spatial generalization and uncertainty calibration.
+
+Enhancements such as stronger regularization, increased training diversity, and refined spatiotemporal validation can help bridge this gap. Overall, the model demonstrates strong robustness with promising potential for deployment across varied hydrological settings.
+
+
+\subsection{Frugality Analysis}
+\label{sec:frugality}
+The final model is an ensemble composed of 15 base chained regression learners per fold, trained across $K$ cross-validation splits, resulting in a total of $15 \times K \times 4$  models. This structure enhances predictive performance and stability but introduces additional computational and memory overhead.
+
+\paragraph{Data Usage and Efficiency}
+The model uses moderate-sized datasets with internally generated features such as out-of-fold (OOF) predictions and empirical flow estimates. While scalable, the generation of OOF features adds to the overall training complexity. No external datasets are required beyond the primary climate and site-level inputs.
+
+\paragraph{Training Runtime and Inference Efficiency}
+Training time increases with the number of base learners but can be parallelized across folds and ensemble members. Reducing the folds and/or number of models per fold substantially decreases latency and memory usage, making the model more deployable in resource-constrained environments.
+
+\begin{table}[H]
+\centering
+\caption{Model Configuration Trade-offs}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Configuration} & \textbf{OOF NLL} & \textbf{Models} & \textbf{Train (m)} & \textbf{Inference (ms)} & \textbf{Size (MB)} \\
+\hline
+Full Ensemble (15/fold) & 1.57 & 300 & ~20 & 2820 & $\sim$78 \\
+Reduced Ensemble (10/fold) & 1.58 & 200 & ~14 & 2260 & $\sim$58.4 \\
+Single Fold (15) & 1.588 & 60 & ~8 & - & $\sim$27.18 \\
+
+\hline
+\end{tabular}
+\label{tab:frugality}
+\end{table}
+
+\noindent \textit{Insight:} A reduced single fold model retains approximately 98\% of the accuracy of the full model while using only 33\% of the resources. This suggests strong potential for model compression techniques such as pruning without significant performance loss.
+However, the reduced model's performance was not tested on the competition's leaderboard, and further validation is needed to ensure spatiotemporal generalization. 
+\section{Summary and Future Work}
+
+This work demonstrates a robust model with strong performance across spatiotemporal domains, though opportunities remain to improve efficiency and uncertainty handling.
+
+Future efforts will focus on optimizing model complexity for faster and more memory-efficient inference, enhancing uncertainty calibration to provide trustworthy prediction intervals across varied hydrological conditions, and developing transfer learning strategies to leverage knowledge from data-rich basins in underrepresented regions. Additionally, integrating real-time adaptation through online learning will improve responsiveness to evolving data streams and environmental changes.
+\end{document}
+

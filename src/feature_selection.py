@@ -72,7 +72,8 @@ if __name__ == '__main__':
     to_drop = [column for column in upper.columns if any(upper[column] > corr_threshold)]
     
     # Final feature set after dropping correlated features
-    soil_features = mi_selected_featues.drop(to_drop).reset_index()
+ 
+    soil_features = pd.DataFrame({'features': mi_selected_featues.drop(to_drop).index.tolist()})
     soil_features.to_csv(os.path.join(DATA_DIR, 'selected_soil_features.csv'), index = False)
     print('Soil Features:', soil_features)
 
