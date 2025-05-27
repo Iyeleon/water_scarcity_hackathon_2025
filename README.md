@@ -73,7 +73,7 @@ make feature_selection
 
 4. Training and inference
 Run train_model.ipynb (LB Model)
-Run train_model_w_soil_features.ipynb (Second model - Better temporal scores, but overconfident on spatiotemporal data with tight prediction interval - reducing NLL score in spatiotemporal stations)
+Optional - Run train_model_w_soil_features.ipynb (Second model - Better LB temporal scores, but overconfident on spatiotemporal data with tight prediction interval - reducing NLL score in spatiotemporal stations)
 
 ## 🧪 Methodology
 The full modeling approach, including data preprocessing, causal analysis, feature selection, and model training, is described in detail in the 📄 project report.
